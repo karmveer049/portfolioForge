@@ -14,7 +14,7 @@ import express          from 'express'
 import multer           from 'multer'
 import { v2 as cloudinary } from 'cloudinary'
 import { authenticate } from '../middleware/auth.js'
-import { extractResumeData } from '../services/resumeParser.js'
+import resumeParser from '../services/resumeParser.js'
 import { User } from '../models/index.js'
 
 const router = express.Router()
@@ -74,7 +74,7 @@ const tempPath = path.join(os.tmpdir(), `${Date.now()}-${req.file.originalname}`
 
 fs.writeFileSync(tempPath, req.file.buffer)
 
-const enhanced = await extractResumeData(tempPath)
+const enhanced = await resumeParser.extractResumeData(tempPath)
 
 fs.unlinkSync(tempPath)
 
