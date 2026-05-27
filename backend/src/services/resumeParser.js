@@ -1,239 +1,129 @@
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fs = require("fs");
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 /**
- * resumeParser.js
- *
- * Step 1: Extract raw text from PDF or DOCX
- * Step 2: Send raw text to Gemini with a structured extraction prompt
- * Step 3: Return clean JSON that maps directly to Portfolio schema fields
+ * Extracts structured portfolio data from a resume PDF using Gemini.
+ * All content is dynamically inferred — NO hardcoded roles, titles, or domain assumptions.
  */
+async function extractResumeData(pdfPath) {
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-import fs from 'fs/promises'
-import path from 'path'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+  const pdfData = fs.readFileSync(pdfPath);
+  const base64PDF = pdfData.toString("base64");
 
-/* ── Text extraction ──────────────────────────────────── */
+  const prompt = `
+You are a resume parser. Analyze the provided resume PDF and extract structured data.
+Return ONLY a valid JSON object — no markdown, no backticks, no explanation.
 
-async function extractFromPDF(buffer) {
-  // Dynamically import pdf-parse (CJS module)
-  const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default
-  const data = await pdfParse(buffer)
-  return data.text
-}
-
-async function extractFromDOCX(buffer) {
-  const mammoth = await import('mammoth')
-  const result  = await mammoth.extractRawText({ buffer })
-  return result.value
-}
-
-export async function extractTextFromFile(buffer, mimetype) {
-  const type = mimetype?.toLowerCase() || ''
-
-  if (type.includes('pdf')) {
-    return extractFromPDF(buffer)
-  }
-
-  if (
-    type.includes('word') ||
-    type.includes('docx') ||
-    type.includes('document') ||
-    type.includes('msword')
-  ) {
-    return extractFromDOCX(buffer)
-  }
-
-  // Plain text fallback
-  return buffer.toString('utf8')
-}
-
-/* ── Gemini structured extraction ─────────────────────── */
-
-const EXTRACTION_PROMPT = `You are an expert resume parser for a developer portfolio platform.
-
-Extract ALL information from the resume text below and return it as a single valid JSON object.
-
-IMPORTANT RULES:
-- Return ONLY raw JSON. No markdown, no code blocks, no explanation.
-- If a field is not found, use null for strings and [] for arrays.
-- For skills, separate them by category as best you can.
-- For projects, extract as much detail as possible.
-- Convert dates to readable format like "Jul 2025" or "2023 – 2027".
-- For phone, include country code if present.
-- Confidence score: 0-100 based on how complete the resume is.
+CRITICAL RULES:
+- Do NOT assume the person is a software developer, full-stack engineer, or tech professional unless the resume explicitly says so.
+- Infer the person's actual field (e.g., Electrical Engineering, Mechanical, Research, Data Science, Finance, Design, Management, etc.) from their education, experience, and skills.
+- Generate ALL text fields dynamically from the resume content. Never use generic developer boilerplate.
+- The "professionalTitle" must reflect their ACTUAL background (e.g., "Electrical Engineering Student", "Mechanical Design Engineer", "Data Analyst", "UX Researcher", not "Full-Stack Developer" unless that's what they are).
+- The "heroTagline" must be unique and relevant to THEIR field — not software development unless applicable.
+- The "openTo" and "lookingFor" arrays must be realistic opportunities for THEIR field and career stage.
+- The "ctaLine" must match their profile — not tech/startup/build language unless appropriate.
+- If the person has mixed background (e.g., EE student who also codes), reflect the primary identity first, secondary as a note.
 
 Return this exact JSON structure:
+
 {
-  "confidence": 85,
-  "personal": {
-    "name": "Full Name",
-    "email": "email@example.com",
-    "phone": "+91 99999 99999",
-    "location": "City, State",
-    "tagline": null
+  "personalInfo": {
+    "name": "Full name from resume",
+    "email": "email if present",
+    "phone": "phone if present",
+    "location": "city/country if present",
+    "linkedin": "LinkedIn URL if present",
+    "github": "GitHub URL if present",
+    "website": "personal website if present",
+    "otherLinks": []
   },
-  "socials": {
-    "github": "https://github.com/username",
-    "linkedin": "https://linkedin.com/in/username",
-    "portfolio": null,
-    "twitter": null,
-    "leetcode": null,
-    "kaggle": null
+  "professionalTitle": "Their actual role/title based on resume (e.g., 'Electrical Engineering Student', 'Marketing Analyst', 'Mechanical Design Intern') — infer from education+experience",
+  "heroTagline": "A compelling one-liner that reflects THEIR actual field and personality. Examples for different profiles: EE student → 'Engineering circuits that power tomorrow.', Researcher → 'Turning data into discovery.', Designer → 'Crafting experiences that speak without words.' — must be unique to this person",
+  "about": {
+    "summary": "2–3 sentence professional summary directly derived from resume content. Mention their field, institution/company, key strengths, and what they're working toward. No generic developer text.",
+    "highlights": ["3–5 bullet highlights from their actual experience/skills/achievements — field-appropriate"]
   },
-  "about": "A brief professional bio extracted or inferred from the resume.",
-  "academics": {
-    "college": "College Name",
-    "degree": "B.Tech Computer Science",
-    "cgpa": "9.07 / 10",
-    "gradYear": "2027",
-    "tenth": null,
-    "twelfth": null
-  },
+  "openTo": ["3–5 realistic opportunities relevant to their field and career stage. For students: internships in their domain, research roles, etc. For professionals: roles matching their actual field. NO software-specific items unless they are a software professional."],
+  "lookingFor": ["3–5 specific goals/opportunities they'd realistically seek based on their resume. Field-specific. NOT 'Remote full-stack roles' or 'AI integration' unless genuinely applicable."],
   "skills": {
-    "languages": ["Python", "JavaScript"],
-    "frameworks": ["React", "FastAPI"],
-    "databases": ["MySQL", "MongoDB"],
-    "tools": ["Git", "Docker", "VS Code"],
-    "ai": ["Scikit-learn", "Gemini API"]
+    "technical": ["technical skills extracted verbatim from resume"],
+    "tools": ["tools/software/instruments mentioned in resume"],
+    "soft": ["soft skills mentioned or implied by experience"],
+    "domain": ["domain-specific knowledge areas from their field"]
   },
-  "projects": [
-    {
-      "title": "Project Name",
-      "description": "What was built and how.",
-      "stack": ["FastAPI", "React"],
-      "liveUrl": "https://...",
-      "githubUrl": "https://github.com/...",
-      "highlight": "Key metric or achievement"
-    }
-  ],
   "experience": [
     {
-      "role": "Machine Learning Intern",
-      "company": "Company Name",
-      "startDate": "Jul 2025",
-      "endDate": "Aug 2025",
-      "type": "Remote",
-      "description": "What was done.",
-      "tech": ["Python", "Scikit-learn"]
+      "title": "Job/Role Title",
+      "company": "Company/Organization",
+      "duration": "Date range",
+      "description": "What they did — from resume",
+      "highlights": ["key achievements if listed"]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Degree name",
+      "institution": "Institution name",
+      "year": "Year/duration",
+      "gpa": "GPA if mentioned",
+      "relevant": ["relevant coursework or achievements if listed"]
+    }
+  ],
+  "projects": [
+    {
+      "name": "Project name",
+      "description": "What it is and what they did",
+      "tech": ["technologies/tools/methods used"],
+      "link": "URL if present",
+      "highlights": ["key outcomes or achievements"]
     }
   ],
   "certifications": [
     {
-      "title": "Certificate Name",
-      "org": "Issuing Organization",
-      "url": null
+      "name": "Certification name",
+      "issuer": "Issuing body",
+      "year": "Year if present"
     }
   ],
-  "achievements": [
-    {
-      "title": "GATE 2026 Qualified",
-      "desc": "Qualified in Electrical Engineering"
-    }
-  ],
-  "missingFields": ["tagline", "about", "tenth", "twelfth"],
-  "suggestedTheme": "soft-editorial"
+  "achievements": ["Notable awards, publications, competitions, etc."],
+  "ctaLine": "A closing call-to-action line matching their field. NOT 'Let's build something worth remembering' for non-developers. Examples: EE → 'Let's engineer the future together.', Researcher → 'Let's explore what's possible.', Analyst → 'Let's turn your data into decisions.' — must fit their actual profile",
+  "profileType": "One of: 'engineering-student' | 'cs-student' | 'software-engineer' | 'researcher' | 'designer' | 'analyst' | 'management' | 'mechanical-engineering' | 'electrical-engineering' | 'other' — used for template theming",
+  "industryDomain": "Primary industry/domain inferred from resume (e.g., 'Electrical & Electronics', 'Software Development', 'Data Science', 'Mechanical Engineering', 'Finance', 'Research', 'Design', etc.)"
 }
+`;
 
-Resume text to parse:
-`
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType: "application/pdf",
+        data: base64PDF,
+      },
+    },
+    { text: prompt },
+  ]);
 
-export async function parseResumeWithAI(rawText) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured')
-
-  const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' })
-
-  // Trim very long resumes to avoid token limits
-  const trimmedText = rawText.slice(0, 8000)
-
-  const result = await model.generateContent(EXTRACTION_PROMPT + trimmedText)
-  const text   = result.response.text().trim()
+  const responseText = result.response.text();
 
   // Strip any accidental markdown fences
-  const clean = text.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim()
+  const clean = responseText
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/gi, "")
+    .trim();
 
   try {
-    return JSON.parse(clean)
-  } catch (parseErr) {
-    console.error('[ResumeParser] JSON parse failed. Raw output:', text.slice(0, 300))
-    throw new Error('AI returned malformed JSON. Please try again.')
+    const parsed = JSON.parse(clean);
+    return parsed;
+  } catch (err) {
+    console.error("Gemini JSON parse error:", err.message);
+    console.error("Raw response:", responseText.substring(0, 500));
+    throw new Error(
+      "Failed to parse Gemini response as JSON. Raw: " +
+        responseText.substring(0, 200)
+    );
   }
 }
 
-/* ── AI Enhancement pass ──────────────────────────────── */
-
-export async function enhanceParsedData(parsed) {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-  const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' })
-
-  const tasks = []
-
-  // Generate about if missing or too short
-  if (!parsed.about || parsed.about.length < 60) {
-    tasks.push(
-      model.generateContent(
-        `Write a professional 2-sentence developer bio for a portfolio website.
-Name: ${parsed.personal?.name}
-Degree: ${parsed.academics?.degree} at ${parsed.academics?.college}
-Skills: ${[...( parsed.skills?.languages || []), ...(parsed.skills?.frameworks || [])].slice(0, 6).join(', ')}
-Projects: ${parsed.projects?.map(p => p.title).join(', ')}
-Achievements: ${parsed.achievements?.map(a => a.title).join(', ')}
-Return plain text only, no quotes, no markdown.`
-      ).then(r => ({ field: 'about', value: r.response.text().trim() }))
-    )
-  }
-
-  // Generate tagline if missing
-  if (!parsed.personal?.tagline) {
-    tasks.push(
-      model.generateContent(
-        `Create a sharp 8-word professional tagline for a developer portfolio.
-Skills: ${[...(parsed.skills?.languages || []), ...(parsed.skills?.frameworks || [])].slice(0, 4).join(', ')}
-Do not use "passionate", "enthusiastic", or "driven".
-Example: "Building thoughtful software for modern startups."
-Return the tagline only, no quotes.`
-      ).then(r => ({ field: 'tagline', value: r.response.text().trim() }))
-    )
-  }
-
-  // Enhance weak project descriptions
-  const enhancedProjects = await Promise.all(
-    (parsed.projects || []).map(async (proj) => {
-      if (!proj.description || proj.description.length < 80) {
-        try {
-          const res = await model.generateContent(
-            `Rewrite this project description for a developer portfolio. 
-Make it technically specific, mention what was built, key tech used, and real-world value.
-Keep it under 3 sentences. Plain text only.
-
-Original: ${proj.description || proj.title}
-Stack: ${(proj.stack || []).join(', ')}
-
-Improved description:`
-          )
-          return { ...proj, description: res.response.text().trim() }
-        } catch {
-          return proj
-        }
-      }
-      return proj
-    })
-  )
-
-  // Wait for parallel about + tagline tasks
-  const enhancements = await Promise.allSettled(tasks)
-
-  const result = {
-    ...parsed,
-    projects: enhancedProjects,
-  }
-
-  for (const task of enhancements) {
-    if (task.status === 'fulfilled') {
-      const { field, value } = task.value
-      if (field === 'about') result.about = value
-      if (field === 'tagline') result.personal = { ...result.personal, tagline: value }
-    }
-  }
-
-  return result
-}
+module.exports = { extractResumeData };

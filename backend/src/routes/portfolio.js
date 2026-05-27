@@ -1,83 +1,119 @@
-import express from 'express'
-import { Portfolio } from '../models/index.js'
-import { authenticate } from '../middleware/auth.js'
-import { queuePortfolioGeneration } from '../services/generator.js'
+const express = require("express");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const { extractResumeData } = require("../services/geminiService");
+const { generatePortfolioHTML } = require("../utils/portfolioGenerator");
+const { deployToGitHubPages } = require("../services/githubService"); // keep existing
 
-const router = express.Router()
+const router = express.Router();
 
-/* POST /api/portfolio/generate — submit form data, kick off async generation */
-router.post('/generate', authenticate, async (req, res) => {
-  try {
-    const { user: _ignored, status: _status, deployedUrl: _d, githubRepoUrl: _g, ...safeBody } = req.body
-const portfolio = await Portfolio.create({
-  ...safeBody,
-  user:   req.user._id,
-  status: 'pending',
-})
+// Multer config — accept PDF only
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname, "../uploads");
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e5)}`;
+    cb(null, `resume-${unique}.pdf`);
+  },
+});
 
-    // Kick off async generation (does NOT block the response)
-    queuePortfolioGeneration(portfolio._id).catch(err => {
-      console.error('[Generator queue error]', err.message)
-    })
-
-    res.status(201).json({
-      message: 'Portfolio generation started. You will receive the URL by email.',
-      portfolioId: portfolio._id,
-    })
-  } catch (err) {
-    console.error('[Generate]', err)
-    res.status(500).json({ message: 'Failed to start generation' })
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype === "application/pdf") {
+    cb(null, true);
+  } else {
+    cb(new Error("Only PDF files are accepted."), false);
   }
-})
+};
 
-/* GET /api/portfolio/my — list current user's portfolios */
-router.get('/my', authenticate, async (req, res) => {
+const upload = multer({ storage, fileFilter, limits: { fileSize: 10 * 1024 * 1024 } });
+
+/**
+ * POST /api/portfolio/generate
+ * Accepts a resume PDF, parses it with Gemini, generates portfolio HTML.
+ * Returns the HTML string and parsed resume data.
+ */
+router.post("/generate", upload.single("resume"), async (req, res) => {
+  let pdfPath = null;
+
   try {
-    const portfolios = await Portfolio.find({ user: req.user._id })
-      .sort({ createdAt: -1 })
-      .select('name tagline theme status deployedUrl githubRepoUrl previewUrl createdAt')
-    res.json({ portfolios })
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch portfolios' })
-  }
-})
+    if (!req.file) {
+      return res.status(400).json({ error: "No PDF file uploaded." });
+    }
 
-/* GET /api/portfolio/:id — single portfolio detail */
-router.get('/:id', authenticate, async (req, res) => {
+    pdfPath = req.file.path;
+    console.log(`[PortfolioForge] Processing resume: ${pdfPath}`);
+
+    // Step 1: Extract structured data from PDF via Gemini
+    console.log("[PortfolioForge] Calling Gemini for resume extraction...");
+    const resumeData = await extractResumeData(pdfPath);
+    console.log(`[PortfolioForge] Extracted profile type: ${resumeData.profileType}`);
+    console.log(`[PortfolioForge] Professional title: ${resumeData.professionalTitle}`);
+
+    // Step 2: Generate portfolio HTML from extracted data
+    console.log("[PortfolioForge] Generating portfolio HTML...");
+    const portfolioHTML = generatePortfolioHTML(resumeData);
+
+    // Step 3: Cleanup uploaded PDF
+    fs.unlinkSync(pdfPath);
+    pdfPath = null;
+
+    return res.status(200).json({
+      success: true,
+      resumeData,
+      portfolioHTML,
+    });
+  } catch (err) {
+    console.error("[PortfolioForge] Generation error:", err.message);
+
+    // Cleanup on error
+    if (pdfPath && fs.existsSync(pdfPath)) {
+      fs.unlinkSync(pdfPath);
+    }
+
+    return res.status(500).json({
+      error: "Portfolio generation failed.",
+      details: err.message,
+    });
+  }
+});
+
+/**
+ * POST /api/portfolio/deploy
+ * Accepts portfolioHTML + resumeData + GitHub credentials, deploys to GitHub Pages.
+ * Keeps existing deploy logic — only passes through the dynamic data.
+ */
+router.post("/deploy", async (req, res) => {
   try {
-    const portfolio = await Portfolio.findOne({
-      _id: req.params.id,
-      user: req.user._id,
-    })
-    if (!portfolio) return res.status(404).json({ message: 'Portfolio not found' })
-    res.json({ portfolio })
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch portfolio' })
-  }
-})
+    const { portfolioHTML, resumeData, githubToken, repoName } = req.body;
 
-/* GET /api/portfolio/:id/status — poll generation status */
-router.get('/:id/status', authenticate, async (req, res) => {
-  try {
-    const portfolio = await Portfolio.findOne(
-      { _id: req.params.id, user: req.user._id },
-      'status statusMessage deployedUrl githubRepoUrl generatedAt deployedAt'
-    )
-    if (!portfolio) return res.status(404).json({ message: 'Not found' })
-    res.json(portfolio)
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to get status' })
-  }
-})
+    if (!portfolioHTML || !githubToken || !repoName) {
+      return res.status(400).json({ error: "Missing required fields: portfolioHTML, githubToken, repoName" });
+    }
 
-/* DELETE /api/portfolio/:id */
-router.delete('/:id', authenticate, async (req, res) => {
-  try {
-    await Portfolio.deleteOne({ _id: req.params.id, user: req.user._id })
-    res.json({ message: 'Portfolio deleted' })
-  } catch (err) {
-    res.status(500).json({ message: 'Delete failed' })
-  }
-})
+    console.log("[PortfolioForge] Deploying to GitHub Pages...");
+    const deployResult = await deployToGitHubPages({
+      html: portfolioHTML,
+      token: githubToken,
+      repoName,
+      ownerName: resumeData?.personalInfo?.name || "portfolio",
+    });
 
-export default router
+    return res.status(200).json({
+      success: true,
+      url: deployResult.url,
+      repo: deployResult.repo,
+    });
+  } catch (err) {
+    console.error("[PortfolioForge] Deploy error:", err.message);
+    return res.status(500).json({
+      error: "Deployment failed.",
+      details: err.message,
+    });
+  }
+});
+
+module.exports = router;
