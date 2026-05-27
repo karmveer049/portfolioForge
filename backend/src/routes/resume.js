@@ -12,11 +12,7 @@ import express          from 'express'
 import multer           from 'multer'
 import { v2 as cloudinary } from 'cloudinary'
 import { authenticate } from '../middleware/auth.js'
-import {
-  extractTextFromFile,
-  parseResumeWithAI,
-  enhanceParsedData,
-} from '../services/resumeParser.js'
+import { extractResumeData } from '../services/resumeParser.js'
 import { User } from '../models/index.js'
 
 const router = express.Router()
@@ -71,20 +67,17 @@ router.post('/parse', authenticate, upload.single('resume'), async (req, res) =>
       console.warn('[Resume] Cloudinary upload failed (non-fatal):', uploadErr.message)
     }
 
-    // 2. Extract raw text from file
-    const rawText = await extractTextFromFile(req.file.buffer, req.file.mimetype)
+   import fs from 'fs'
+import path from 'path'
+import os from 'os'
 
-    if (!rawText || rawText.trim().length < 50) {
-      return res.status(422).json({
-        message: 'Could not extract readable text from this file. Please try a text-based PDF or DOCX.',
-      })
-    }
+const tempPath = path.join(os.tmpdir(), `${Date.now()}-${req.file.originalname}`)
 
-    // 3. Parse with Gemini
-    const parsed = await parseResumeWithAI(rawText)
+fs.writeFileSync(tempPath, req.file.buffer)
 
-    // 4. AI enhancement pass
-    const enhanced = await enhanceParsedData(parsed)
+const enhanced = await extractResumeData(tempPath)
+
+fs.unlinkSync(tempPath)
 
     // 5. Attach resume URL
     if (resumeUrl) {
@@ -100,7 +93,7 @@ router.post('/parse', authenticate, upload.single('resume'), async (req, res) =>
       success:   true,
       data:      enhanced,
       resumeUrl: resumeUrl || null,
-      rawLength: rawText.length,
+      rawLength: JSON.stringify(enhanced).length,
     })
   } catch (err) {
     console.error('[Resume parse error]', err.message)
