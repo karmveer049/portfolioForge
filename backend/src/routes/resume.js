@@ -7,7 +7,9 @@
  *   - Returns structured JSON ready to auto-fill the Builder form
  *   - Optionally saves parsed data to the user's session in DB
  */
-
+import fs from 'fs'
+import path from 'path'
+import os from 'os'
 import express          from 'express'
 import multer           from 'multer'
 import { v2 as cloudinary } from 'cloudinary'
@@ -67,10 +69,7 @@ router.post('/parse', authenticate, upload.single('resume'), async (req, res) =>
       console.warn('[Resume] Cloudinary upload failed (non-fatal):', uploadErr.message)
     }
 
-   import fs from 'fs'
-import path from 'path'
-import os from 'os'
-
+ 
 const tempPath = path.join(os.tmpdir(), `${Date.now()}-${req.file.originalname}`)
 
 fs.writeFileSync(tempPath, req.file.buffer)
